@@ -6,6 +6,7 @@ package akka.stream.alpakka.mqtt
 import java.util.concurrent.Semaphore
 
 import akka.Done
+import akka.stream.ActorAttributes.SupervisionStrategy
 import akka.stream._
 import akka.stream.stage._
 import org.eclipse.paho.client.mqttv3.{IMqttAsyncClient, IMqttToken}
@@ -13,6 +14,7 @@ import org.eclipse.paho.client.mqttv3.{IMqttAsyncClient, IMqttToken}
 import scala.collection.mutable
 import scala.concurrent._
 import scala.util.Try
+import scala.util.control.NonFatal
 
 final class MqttSourceStage(settings: MqttSourceSettings, bufferSize: Int)
     extends GraphStageWithMaterializedValue[SourceShape[MqttMessage], Future[Done]] {
@@ -28,6 +30,9 @@ final class MqttSourceStage(settings: MqttSourceSettings, bufferSize: Int)
     val subscriptionPromise = Promise[Done]
 
     (new GraphStageLogic(shape) with MqttConnectorLogic {
+
+      private def decider =
+        inheritedAttributes.get[SupervisionStrategy].map(_.decider).getOrElse(Supervision.stoppingDecider)
 
       private val queue = mutable.Queue[MqttMessage]()
       private val mqttSubscriptionCallback: Try[IMqttToken] => Unit = conn =>
@@ -71,8 +76,16 @@ final class MqttSourceStage(settings: MqttSourceSettings, bufferSize: Int)
         backpressure.release()
       }
 
-      override def handleConnectionLost(ex: Throwable) =
-        failStage(ex)
+      override def handleConnectionLost(ex: Throwable) = {
+        ex match {
+          case NonFatal(ex) => decider(ex) match {
+            case Supervision.Stop ⇒ failStage(ex)
+            case _ ⇒ //nothing
+          }
+          case _ => failStage(ex)
+        }
+      }
+
 
       override def postStop() =
         mqttClient.foreach {

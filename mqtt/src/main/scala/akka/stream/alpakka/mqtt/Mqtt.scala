@@ -75,7 +75,8 @@ final case class MqttConnectionSettings(
     persistence: MqttClientPersistence,
     auth: Option[(String, String)] = None,
     cleanSession: Boolean = true,
-    will: Option[Will] = None
+    will: Option[Will] = None,
+    automaticReconnect: Boolean = false
 ) {
   def withBroker(broker: String) =
     copy(broker = broker)
@@ -91,6 +92,9 @@ final case class MqttConnectionSettings(
 
   def withClientId(clientId: String) =
     copy(clientId = clientId)
+
+  def withAutomaticReconnect(automaticReconnect: Boolean) =
+    copy(automaticReconnect = automaticReconnect)
 }
 
 object MqttConnectionSettings {
@@ -143,7 +147,7 @@ private[mqtt] trait MqttConnectorLogic { this: GraphStageLogic =>
       connectionSettings.persistence
     )
 
-    client.setCallback(new MqttCallback {
+    client.setCallback(new MqttCallbackExtended {
       def messageArrived(topic: String, message: PahoMqttMessage) =
         onMessage(MqttMessage(topic, ByteString(message.getPayload)))
 
@@ -152,6 +156,9 @@ private[mqtt] trait MqttConnectorLogic { this: GraphStageLogic =>
 
       def connectionLost(cause: Throwable) =
         onConnectionLost.invoke(cause)
+
+      def connectComplete(reconnect: Boolean, serverURI: String) =
+        onConnect.invoke(client)
     })
     val connectOptions = new MqttConnectOptions
     connectionSettings.auth.foreach {
@@ -163,11 +170,12 @@ private[mqtt] trait MqttConnectorLogic { this: GraphStageLogic =>
       connectOptions.setWill(will.message.topic, will.message.payload.toArray, will.qos.byteValue.toInt, will.retained)
     }
     connectOptions.setCleanSession(connectionSettings.cleanSession)
+    connectOptions.setAutomaticReconnect(connectionSettings.automaticReconnect)
     client.connect(connectOptions, (), connectHandler)
   }
 
   private val connectHandler: Try[IMqttToken] => Unit = {
-    case Success(token) => onConnect.invoke(token.getClient)
+    case Success(token) =>
     case Failure(ex) => onConnectionLost.invoke(ex)
   }
 }

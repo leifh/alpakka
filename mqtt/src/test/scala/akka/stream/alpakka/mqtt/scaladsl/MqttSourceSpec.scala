@@ -17,6 +17,7 @@ import org.scalatest.concurrent.ScalaFutures
 
 import scala.collection.immutable.Seq
 import scala.concurrent.duration._
+import scala.util.Try
 
 class MqttSourceSpec
     extends TestKit(ActorSystem("MqttSinkSpec"))
@@ -204,6 +205,47 @@ class MqttSourceSpec
         val (sub, elem) = source.toMat(Sink.head)(Keep.both).run()
         whenReady(sub) { _ =>
           elem.futureValue shouldBe MqttMessage(willTopic, ByteString("ohi"))
+        }
+      }
+    }
+
+    "support reconnection" in {
+      import system.dispatcher
+
+      val decider: Supervision.Decider = {
+        case _                      => Supervision.Resume
+      }
+
+      def tcpProxy() = {
+        val (binding, connection) = Tcp().bind("localhost", 1337).toMat(Sink.head)(Keep.both).run()
+
+        val ks = connection.map(
+          _.handleWith(Tcp().outgoingConnection("localhost", 1883).viaMat(KillSwitches.single)(Keep.right))
+        )
+
+        (binding, connection, ks)
+      }
+
+      val (binding, connection, ks) = tcpProxy()
+
+      whenReady(binding) { _ =>
+        val settings = MqttSourceSettings(sourceSettings.withBroker("tcp://localhost:1337").withCleanSession(false).withAutomaticReconnect(true), Map(topic1 -> MqttQoS.AtLeastOnce))
+        val (subscriptionFuture, probe) = MqttSource(settings, 8).withAttributes(ActorAttributes.supervisionStrategy(decider)).toMat(TestSink.probe)(Keep.both).run()
+
+        whenReady(subscriptionFuture) { _ =>
+          val msg1 = MqttMessage(topic1, ByteString("ohi1"))
+          Source.single(msg1).runWith(MqttSink(sinkSettings, MqttQoS.AtLeastOnce))
+          probe.requestNext shouldBe msg1
+
+          whenReady(ks)(_.shutdown())
+
+          val (binding2, connection2, ks2) = tcpProxy()
+
+          whenReady(binding2) { _ =>
+            val msg2 = MqttMessage(topic1, ByteString("ohi2"))
+            Source.single(msg2).runWith(MqttSink(sinkSettings, MqttQoS.AtLeastOnce))
+            probe.requestNext() shouldBe msg2
+          }
         }
       }
     }
